@@ -1,72 +1,75 @@
-# polymarket-weather-v1
+# Polymarket Weather v1
 
 Correlation engine between Polymarket prediction markets and weather data.
 
 ## Quick Start
 
 ```bash
-# 1. Configure environment
-cp .env.example .env
-# edit .env as needed
+# 1. Clone & enter project
+cd /opt/projects/polymarket-weather-v1
 
-# 2. Start services
+# 2. Copy env file and edit
+cp .env.example .env
+# edit .env with your keys
+
+# 3. Start services
 docker compose up -d --build
 
-# 3. Verify
+# 4. Check health
 curl http://localhost:8000/health
-# {"status":"ok","service":"polymarket-weather-v1"}
-```
 
-## Local Development (without Docker)
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-# run migrations
-alembic upgrade head
-
-# start dev server
-uvicorn app.main:app --reload
-```
-
-## Database Migrations
-
-```bash
-# generate a new migration
-alembic revision --autogenerate -m "describe change"
-
-# apply migrations
-alembic upgrade head
-
-# rollback one step
-alembic downgrade -1
+# 5. Run migrations
+docker compose exec app alembic upgrade head
 ```
 
 ## Project Structure
 
 ```
 polymarket-weather-v1/
-├── alembic/           # DB migrations
+├── alembic/                 # Database migrations
 │   ├── env.py
+│   ├── script.py.mako
 │   └── versions/
-├── app/
-│   ├── api/           # FastAPI routers
-│   ├── core/          # config, database session
-│   ├── models/        # SQLAlchemy models
-│   ├── schemas/       # Pydantic schemas
-│   └── main.py        # FastAPI app
-├── Dockerfile
-├── docker-compose.yml
 ├── alembic.ini
-├── requirements.txt
-└── .env.example
+├── app/
+│   ├── __init__.py
+│   ├── main.py              # FastAPI app
+│   ├── api/
+│   │   ├── __init__.py
+│   │   └── health.py        # GET /health
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── config.py         # Pydantic settings
+│   │   └── database.py       # SQLAlchemy async session
+│   ├── models/
+│   │   ├── __init__.py
+│   │   └── base.py           # DeclarativeBase + TimestampMixin
+│   └── schemas/
+│       └── __init__.py
+├── docker-compose.yml
+├── Dockerfile
+├── .env.example
+├── .gitignore
+├── README.md
+└── requirements.txt
 ```
 
-## Tech Stack
+## Development
 
-- **FastAPI** — async web framework
-- **SQLAlchemy 2** (async) + **asyncpg** — ORM + PostgreSQL driver
-- **Alembic** — database migrations
-- **PostgreSQL 16** — primary database
-- **Docker Compose** — local orchestration
+```bash
+# Local dev with auto-reload
+docker compose up -d --build
+docker compose logs -f app
+
+# Create a migration
+docker compose exec app alembic revision --autogenerate -m "description"
+
+# Apply migrations
+docker compose exec app alembic upgrade head
+```
+
+## API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Service health check |
