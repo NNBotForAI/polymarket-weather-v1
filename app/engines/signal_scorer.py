@@ -1,76 +1,129 @@
-"""Signal scoring engine — compare market price vs weather probability."""
+"""Signal scoring engine V1.1 — compare market price vs weather probability.
+
+Consumes the new WeatherProbabilityResult with structured rejection reasons.
+"""
 
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from app.engines.weather_probability import WeatherProbabilityResult
+
 logger = logging.getLogger(__name__)
 
-# Minimum edge (in percentage points) to generate a signal
-MIN_EDGE = 0.05  # 5 percentage points
-
-# Edge thresholds for confidence levels
-CONFIDENCE_THRESHOLDS = {
-    "high": 0.15,    # 15+ pp edge
-    "medium": 0.10,  # 10-15 pp edge
-    "low": 0.05,     # 5-10 pp edge
-}
+# ── Thresholds ────────────────────────────────────────────────────────
+MIN_EDGE = 0.05          # 5pp minimum edge
+MIN_CONFIDENCE = 0.3     # minimum weather confidence to trade
+MAX_SPREAD = 0.10        # maximum acceptable spread
+MAX_FRESHNESS_MIN = 360  # reject if data older than 6 hours
+EDGE_THRESHOLDS = {"high": 0.15, "medium": 0.10, "low": 0.05}
 
 
 def score_signal(
     market_yes_price: float,
-    weather_prob: float,
+    weather_result: WeatherProbabilityResult,
     market_id: int,
+    spread: float | None = None,
+    liquidity: float | None = None,
     book_snapshot_id: int | None = None,
     weather_model_id: int | None = None,
+    parse_confidence: str | None = None,
 ) -> dict[str, Any]:
-    """Generate a signal score comparing market price to weather probability.
+    """Generate a signal score from market price and weather probability.
 
-    Args:
-        market_yes_price: Current market price for Yes (0.0 - 1.0)
-        weather_prob: Estimated probability of Yes from weather model (0.0 - 1.0)
-        market_id: Market ID
-        book_snapshot_id: Optional book snapshot ID
-        weather_model_id: Optional weather model run ID
-
-    Returns:
-        Signal dict with edge, direction, confidence, recommendation, explainability.
+    Returns dict with: edge, direction, confidence, recommendation,
+    rejection_reasons (if any), explainability.
     """
-    edge = weather_prob - market_yes_price
+    rejection_reasons: list[str] = []
+    true_prob = weather_result.true_prob_raw
+    weather_confidence = weather_result.confidence_score
 
-    # Determine direction
+    # ── Pre-flight checks (structured rejection) ──
+
+    # Check if weather engine rejected the estimate
+    if weather_result.source == "rejected":
+        rejection_reasons.append(weather_result.feature_json.get("rejection_reason", "weather_engine_rejected"))
+
+    # Parser confidence
+    if parse_confidence == "low":
+        rejection_reasons.append("parser_confidence_too_low")
+
+    # Stale data
+    if weather_result.data_freshness_minutes and weather_result.data_freshness_minutes > MAX_FRESHNESS_MIN:
+        rejection_reasons.append("stale_weather_data")
+
+    # Unsupported weather type
+    if weather_result.model_notes and "REJECTED" in weather_result.model_notes:
+        if "unsupported" not in str(rejection_reasons):
+            rejection_reasons.append("unsupported_weather_type")
+
+    # Weather confidence too low
+    if weather_confidence < MIN_CONFIDENCE:
+        rejection_reasons.append("insufficient_weather_confidence")
+
+    # Spread check
+    if spread is not None and spread > MAX_SPREAD:
+        rejection_reasons.append("spread_too_wide")
+
+    # Liquidity check
+    if liquidity is not None and liquidity < 1000:
+        rejection_reasons.append("insufficient_liquidity")
+
+    # ── Calculate edge ──
+    edge = true_prob - market_yes_price
+
+    # Edge check
     if abs(edge) < MIN_EDGE:
+        rejection_reasons.append("edge_too_small")
+
+    # ── Determine action ──
+    if rejection_reasons:
         direction = None
         recommendation = "skip"
         confidence = "none"
     elif edge > 0:
         direction = "YES"
         recommendation = "buy_yes"
+        abs_edge = abs(edge)
+        if abs_edge >= EDGE_THRESHOLDS["high"]:
+            confidence = "high"
+        elif abs_edge >= EDGE_THRESHOLDS["medium"]:
+            confidence = "medium"
+        else:
+            confidence = "low"
     else:
         direction = "NO"
         recommendation = "buy_no"
-
-    # Determine confidence
-    if recommendation != "skip":
         abs_edge = abs(edge)
-        if abs_edge >= CONFIDENCE_THRESHOLDS["high"]:
+        if abs_edge >= EDGE_THRESHOLDS["high"]:
             confidence = "high"
-        elif abs_edge >= CONFIDENCE_THRESHOLDS["medium"]:
+        elif abs_edge >= EDGE_THRESHOLDS["medium"]:
             confidence = "medium"
         else:
             confidence = "low"
 
-    # Build explainability
+    # Adjust confidence by weather confidence
+    if confidence not in ("none",) and weather_confidence < 0.6:
+        confidence = "low"
+
+    # ── Build explainability ──
     explainability = {
         "market_price": market_yes_price,
-        "weather_probability": weather_prob,
-        "edge": edge,
+        "weather_probability": true_prob,
+        "weather_confidence": weather_confidence,
+        "edge": round(edge, 4),
         "edge_pp": round(edge * 100, 2),
         "direction": direction,
         "confidence": confidence,
         "recommendation": recommendation,
-        "min_edge_threshold": MIN_EDGE,
-        "reasoning": _build_reasoning(market_yes_price, weather_prob, edge, direction),
+        "rejection_reasons": rejection_reasons,
+        "weather_source": weather_result.source,
+        "weather_type": weather_result.weather_type,
+        "data_freshness_minutes": weather_result.data_freshness_minutes,
+        "spread": spread,
+        "liquidity": liquidity,
+        "model_notes": weather_result.model_notes,
+        "feature_json": weather_result.feature_json,
     }
 
     return {
@@ -78,31 +131,40 @@ def score_signal(
         "book_snapshot_id": book_snapshot_id,
         "weather_model_id": weather_model_id,
         "market_yes_price": market_yes_price,
-        "weather_prob": weather_prob,
-        "edge": edge,
+        "weather_prob": true_prob,
+        "edge": round(edge, 4),
         "direction": direction,
         "confidence": confidence,
         "recommendation": recommendation,
+        "rejection_reasons": rejection_reasons,
         "explainability": explainability,
         "scored_at": datetime.now(timezone.utc),
     }
 
 
-def _build_reasoning(
-    market_price: float,
+# Backward-compatible wrapper for tests that pass raw floats
+def score_signal_simple(
+    market_yes_price: float,
     weather_prob: float,
-    edge: float,
-    direction: str | None,
-) -> str:
-    """Human-readable reasoning for the signal."""
-    if direction is None:
-        return (
-            f"No actionable edge: market at {market_price:.1%}, "
-            f"weather model at {weather_prob:.1%}, "
-            f"edge {edge:.1%} below threshold."
-        )
-    return (
-        f"Market prices {direction} at {market_price:.1%} but weather model "
-        f"estimates {weather_prob:.1%}. Edge: {edge:+.1%}. "
-        f"Recommendation: {direction}."
+    market_id: int,
+    confidence: float = 0.8,
+    book_snapshot_id: int | None = None,
+    weather_model_id: int | None = None,
+) -> dict[str, Any]:
+    """Simple wrapper that creates a WeatherProbabilityResult from floats."""
+    result = WeatherProbabilityResult(
+        true_prob_raw=weather_prob,
+        confidence_score=confidence,
+        data_freshness_minutes=10.0,
+        model_notes="simple wrapper",
+        feature_json={"method": "simple"},
+        source="direct",
+        weather_type="unknown",
+    )
+    return score_signal(
+        market_yes_price=market_yes_price,
+        weather_result=result,
+        market_id=market_id,
+        book_snapshot_id=book_snapshot_id,
+        weather_model_id=weather_model_id,
     )

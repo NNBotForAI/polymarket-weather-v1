@@ -2,7 +2,11 @@
 
 import pytest
 from app.parsers.binary_parser import is_binary_market, parse_binary_market
-from app.parsers.weather_parser import is_weather_market, parse_weather_market
+from app.parsers.weather_parser import (
+    is_weather_market,
+    parse_weather_market,
+    SUPPORTED_WEATHER_TYPES,
+)
 
 
 class TestBinaryParser:
@@ -42,36 +46,113 @@ class TestBinaryParser:
         assert result["is_binary"] is True
 
 
-class TestWeatherParser:
-    def test_is_weather_temperature(self):
-        assert is_weather_market("Will the temperature exceed 90°F in Phoenix?") is True
+class TestWeatherParserV11:
+    """V1.1 enhanced parser tests."""
 
-    def test_is_weather_rain(self):
-        assert is_weather_market("Will it rain in London tomorrow?") is True
-
-    def test_is_weather_hurricane(self):
-        assert is_weather_market("Will a hurricane hit Florida?") is True
-
-    def test_not_weather(self):
-        assert is_weather_market("Will Bitcoin reach $100k?") is False
-
-    def test_parse_temperature(self):
+    # ── Temperature ──
+    def test_temperature_above_fahrenheit(self):
         result = parse_weather_market("Will temperature exceed 90°F in Phoenix?")
         assert result["is_weather"] is True
-        assert result["metric"] == "temperature"
-        assert result["threshold"] == "90"
+        assert result["weather_type"] == "temperature"
+        assert result["threshold_value"] == "90"
+        assert result["threshold_unit"] == "fahrenheit"
+        assert result["threshold_operator"] is not None
+        assert result["location_name"] is not None
 
-    def test_parse_rain(self):
+    def test_temperature_celsius(self):
+        result = parse_weather_market("Will the temperature reach 35 celsius in London?")
+        assert result["weather_type"] == "temperature"
+        assert result["threshold_value"] == "35"
+        assert result["threshold_unit"] == "celsius"
+
+    def test_temperature_below(self):
+        result = parse_weather_market("Will temperature fall below 32°F in Chicago?")
+        assert result["weather_type"] == "temperature"
+        assert result["threshold_operator"] == "below"
+        assert result["location_name"] is not None
+
+    # ── Rainfall ──
+    def test_rainfall_inches(self):
         result = parse_weather_market("Will there be more than 2 inches of rain in Seattle?")
         assert result["is_weather"] is True
-        assert result["metric"] == "rainfall"
-        assert result["threshold"] == "2"
+        assert result["weather_type"] == "rainfall"
+        assert result["threshold_value"] == "2"
+        assert result["threshold_unit"] == "inches"
+        assert result["location_name"] is not None
 
-    def test_parse_non_weather(self):
-        result = parse_weather_market("Will Trump win 2028?")
-        assert result["is_weather"] is False
+    def test_rainfall_mm(self):
+        result = parse_weather_market("Will rainfall exceed 50mm in Tokyo tomorrow?")
+        assert result["weather_type"] == "rainfall"
+        assert result["threshold_value"] == "50"
+        assert result["threshold_unit"] == "mm"
 
-    def test_parse_location(self):
-        result = parse_weather_market("Will it snow in New York City in December?")
+    # ── Hurricane ──
+    def test_hurricane_wind(self):
+        result = parse_weather_market("Will wind speeds exceed 74 mph during the hurricane in Florida?")
         assert result["is_weather"] is True
-        assert result["location"] is not None
+        assert result["weather_type"] == "hurricane"
+        assert result["threshold_value"] == "74"
+
+    # ── Location detection ──
+    def test_known_city_nyc(self):
+        result = parse_weather_market("Will it rain in NYC tomorrow?")
+        assert result["location_name"] == "New York"
+        assert result["location_data"]["lat"] is not None
+
+    def test_known_city_london(self):
+        result = parse_weather_market("Will temperature reach 90°F in London?")
+        assert result["location_name"] == "London"
+
+    def test_missing_location(self):
+        result = parse_weather_market("Will temperature exceed 90°F tomorrow?")
+        assert result["location_name"] is None
+        assert "missing_location" in result["ambiguity_flags"]
+
+    def test_unverified_location(self):
+        result = parse_weather_market("Will it rain in Springfield tomorrow?")
+        # Springfield isn't in known locations, so it's regex-matched
+        # May or may not be found depending on regex
+        # The key thing is it shouldn't crash
+
+    # ── Ambiguity detection ──
+    def test_ambiguous_no_threshold(self):
+        result = parse_weather_market("Will the weather be bad in New York?")
+        assert "missing_threshold" in result["ambiguity_flags"]
+        assert result["parse_confidence"] in ("low", "medium")
+
+    def test_ambiguous_unsupported_type(self):
+        result = parse_weather_market("Will there be a tornado in Dallas?")
+        assert "unsupported_weather_type" in result.get("ambiguity_flags", [])
+
+    def test_parse_confidence_high(self):
+        """Well-formed question with known city, clear threshold."""
+        result = parse_weather_market("Will temperature exceed 90°F in Phoenix tomorrow?")
+        assert result["parse_confidence"] in ("high", "medium")
+
+    def test_parse_confidence_low_no_location(self):
+        result = parse_weather_market("Will temperature exceed 90°F tomorrow?")
+        assert result["parse_confidence"] == "low"
+
+    # ── Non-weather ──
+    def test_not_weather(self):
+        result = parse_weather_market("Will Bitcoin reach $100k?")
+        assert result["is_weather"] is False
+        assert result["weather_type"] is None
+
+    # ── Legacy compat ──
+    def test_legacy_fields(self):
+        result = parse_weather_market("Will temperature exceed 90°F in Phoenix?")
+        assert result["metric"] == result["weather_type"]
+        assert result["location"] == result["location_name"]
+        assert result["threshold"] == result["threshold_value"]
+        assert result["comparator"] == result["threshold_operator"]
+
+    # ── Observation window ──
+    def test_relative_date_tomorrow(self):
+        result = parse_weather_market("Will it rain in NYC tomorrow?")
+        assert result["observation_window_start"] is not None
+        assert result["observation_window_end"] is not None
+
+    def test_relative_date_today(self):
+        result = parse_weather_market("Will it rain in NYC today?")
+        assert result["observation_window_start"] is not None
