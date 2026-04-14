@@ -7,15 +7,18 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from app.clients import search_markets
+from app.clients import public_search
+from app.core.config import settings
 from app.core.database import async_session
 from app.models.book_snapshots import BookSnapshot
 from app.models.job_runs import JobRun
 from app.models.markets import Market
 from app.models.market_parses import MarketParse
+from app.models.signal_scores import SignalScore
+from app.models.weather_model_runs import WeatherModelRun
 from app.models.source_events import SourceEvent
 from app.parsers.binary_parser import is_binary_market, parse_binary_market
-from app.parsers.weather_parser import is_weather_market, parse_weather_market
+from app.parsers.weather_parser_v2 import parse_weather_market  # V1.5: Use new parser
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ async def run_scan() -> dict:
         await session.flush()
 
         try:
-            # Search for weather-related markets
+            # Search for weather-related markets via /public-search
             keywords = [
                 "weather", "temperature", "rain", "snow", "hurricane",
                 "tornado", "flood", "storm", "heat", "cold",
@@ -47,8 +50,11 @@ async def run_scan() -> dict:
             all_raw: list[dict] = []
             for kw in keywords:
                 try:
-                    results = await search_markets(query=kw, limit=50, closed=False)
-                    all_raw.extend(results)
+                    result = await public_search(query=kw, limit=50)
+                    # Extract markets from each matching event
+                    for event in result.get("events", []):
+                        for market in event.get("markets", []):
+                            all_raw.append(market)
                 except Exception as e:
                     logger.warning("Search failed for keyword '%s': %s", kw, e)
 
@@ -91,7 +97,9 @@ async def run_scan() -> dict:
 
                 # Parse market
                 parsed = parse_binary_market(raw)
-                weather_info = parse_weather_market(parsed["question"])
+
+                # V1.5: Use new parser with two-layer filtering
+                weather_info = parse_weather_market(parsed)
 
                 market = Market(
                     polymarket_id=pm_id,
@@ -141,8 +149,15 @@ async def run_scan() -> dict:
                 if weather_info["is_weather"]:
                     stats["weather_markets"] += 1
 
+            # Check for degraded mode
+            degraded_mode = not settings.weather_api_key
+            if degraded_mode:
+                logger.warning("DEGRADED MODE: No WEATHER_API_KEY configured. Weather scoring will be disabled.")
+                job.result_meta = {**stats, "degraded_mode": True, "degraded_reason": "missing_weather_api_key"}
+            else:
+                job.result_meta = stats
+
             job.status = "success"
-            job.result_meta = stats
 
         except Exception as e:
             logger.exception("Scan job failed")

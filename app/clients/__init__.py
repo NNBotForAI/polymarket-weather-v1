@@ -21,7 +21,7 @@ async def search_markets(
     order: str = "end_date_iso",
     ascending: bool = True,
 ) -> list[dict[str, Any]]:
-    """Search Polymarket markets via the Gamma API."""
+    """Search Polymarket markets via the Gamma API /markets endpoint."""
     params: dict[str, Any] = {
         "closed": str(closed).lower(),
         "limit": limit,
@@ -36,6 +36,21 @@ async def search_markets(
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(f"{GAMMA_BASE}/markets", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def public_search(query: str, limit: int = 50) -> dict[str, Any]:
+    """Search events, markets and profiles via /public-search.
+
+    Returns dict with 'events' key containing matching events.
+    Each event has a 'markets' list with individual market data.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{GAMMA_BASE}/public-search",
+            params={"q": query, "limit": limit},
+        )
         resp.raise_for_status()
         return resp.json()
 
