@@ -149,9 +149,11 @@ async def run_scan() -> dict:
                 if weather_info["is_weather"]:
                     stats["weather_markets"] += 1
 
-            # Check for degraded mode
-            degraded_mode = not settings.weather_api_key
+            # Check for degraded mode (only if no provider available)
+            degraded_mode = not settings.weather_api_key or settings.weather_api_key == "your-api-key-here"
             if degraded_mode:
+                logger.info("Using Open-Meteo (free, no API key) as weather provider.")
+                degraded_mode = False  # Open-Meteo is always available
                 logger.warning("DEGRADED MODE: No WEATHER_API_KEY configured. Weather scoring will be disabled.")
                 job.result_meta = {**stats, "degraded_mode": True, "degraded_reason": "missing_weather_api_key"}
             else:
